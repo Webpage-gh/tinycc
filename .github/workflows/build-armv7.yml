@@ -1,0 +1,65 @@
+name: build tcc for ARMv7 (armeabi-v7a / soft-float)
+
+on:
+  push:
+    branches: [ mob ]
+  workflow_dispatch:
+
+jobs:
+  build-armv7:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: install arm cross toolchain
+      run: |
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y gcc-arm-linux-gnueabi
+
+    - name: make & test tcc (armv7, soft-float ABI)
+      # ARMv7 (Cortex-A9, no VFP/NEON/IDIV in Features) -> soft-float, no EABI.
+      # --triplet arm-unknown-linux-gnueabi ends in "eabi" (not "eabihf"),
+      # so configure builds TCC_ARM_EABI+TCC_ARM_VFP-less tcc.
+      run: |
+        ./configure \
+          --cpu=arm \
+          --triplet=arm-unknown-linux-gnueabi \
+          --cross-prefix=arm-linux-gnueabi-
+
+        # c2str.exe is a host tool (build-time), but the Makefile uses
+        # $(CC) to build it.  Since CC=arm-linux-gnueabi-gcc produces an
+        # ARM binary that can't run on the x86_64 host, we must first
+        # build c2str.exe with the host compiler, then let make use it
+        # for tccdefs_.h without rebuilding.
+        gcc -DC2STR conftest.c -o c2str.exe
+        ./c2str.exe include/tccdefs.h tccdefs_.h
+
+        # Now build tcc itself with the cross compiler.  c2str.exe and
+        # tccdefs_.h already exist so make won't try to rebuild them.
+        make CC=arm-linux-gnueabi-gcc
+        cp tcc tcc-armv7-softfp
+        arm-linux-gnueabi-strip --strip-unneeded tcc-armv7-softfp
+
+    - name: smoke test (qemu-arm)
+      run: |
+        sudo apt-get install -q -y qemu-user
+        qemu-arm -L /usr/arm-linux-gnueabi ./tcc -v
+        qemu-arm -L /usr/arm-linux-gnueabi ./tcc -B. examples/ex1.c -o ex1.arm
+        qemu-arm -L /usr/arm-linux-gnueabi ./ex1.arm
+        qemu-arm -L /usr/arm-linux-gnueabi ./tcc -B. -run examples/ex1.c
+
+    - name: package
+      run: |
+        mkdir -p dist/armv7/lib/tcc
+        cp tcc-armv7-softfp dist/tcc-armv7
+        cp i386/*.c i386/*.h dist/ 2>/dev/null || true
+        # tcc needs its lib/ tree (crt, libcdefs, etc.) to compile programs
+        cp -r lib/* dist/lib/tcc/ 2>/dev/null || true
+        cd dist && tar czf ../tcc-armv7-softfp.tar.gz .
+
+    - name: upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tcc-armv7-softfp
+        path: tcc-armv7-softfp.tar.gz

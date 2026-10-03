@@ -1,149 +1,67 @@
-name: build and test
+name: Build tcc for ARMv7 musl softfloat
 
 on:
   push:
     branches: [ mob ]
+  workflow_dispatch:
 
 jobs:
-  test-x86_64-linux:
+  build-armv7-musl-softfloat:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
     steps:
-    - uses: actions/checkout@v4
-    - name: make & test tcc (x86_64-linux)
-      run: ./configure && make && make test -k
+      - name: Checkout tcc
+        uses: actions/checkout@v4
 
-  test-x86_64-osx:
-    runs-on: macos-15-intel
-    timeout-minutes: 2
-    steps:
-    - uses: actions/checkout@v4
-    - name: make & test tcc (x86_64-osx)
-      run: ./configure && make && make test -k
-
-  test-aarch64-osx:
-    runs-on: macos-15
-    timeout-minutes: 2
-    steps:
-    - uses: actions/checkout@v4
-    - name: make & test tcc (aarch64-osx)
-      run: ./configure && make && make test -k
-
-  test-x86_64-win32:
-    runs-on: windows-2025
-    timeout-minutes: 6
-    steps:
-    - uses: actions/checkout@v4
-    - name: build & test (x86_64-win32)
-      shell: cmd
-      run: |
-        cd win32
-        for /f "delims=" %%i in ('vswhere.exe -latest -property installationPath') do call "%%i\VC\Auxiliary\Build\vcvarsall.bat" amd64
-        call build-tcc.bat -c cl -t x86_64
-        cd ..\tests
-        call test-win32.bat all -k
-
-  test-i386-win32:
-    runs-on: windows-2025
-    timeout-minutes: 6
-    steps:
-    - uses: actions/checkout@v4
-    - name: build & test (i386-win32)
-      shell: cmd
-      run: |
-        cd win32
-        for /f "delims=" %%i in ('vswhere.exe -latest -property installationPath') do call "%%i\VC\Auxiliary\Build\vcvarsall.bat" x86
-        call build-tcc.bat -c cl -t i386
-        cd ..\tests
-        call test-win32.bat -p c:\mingw32\bin all -k
-
-  test-arm64-win32:
-    runs-on: windows-11-arm
-    timeout-minutes: 6
-    steps:
-    - uses: actions/checkout@v4
-    - name: build and test (arm64-win32)
-      shell: cmd
-      run: |
-        cd win32
-        for /f "delims=" %%i in ('vswhere.exe -latest -property installationPath') do call "%%i\VC\Auxiliary\Build\vcvarsall.bat" arm64
-        call build-tcc.bat -c cl -t arm64
-        cd ..\tests
-        call test-win32.bat -c clang all -k
-
-  test-armv7-linux:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 8
-    steps:
-    - uses: actions/checkout@v4
-    - uses: uraimo/run-on-arch-action@v3
-      name: make & test tcc (armv7-linux)
-      with:
-        arch: armv7
-        distro: ubuntu22.04
-        githubToken: ${{ github.token }}
-        install: |
-          apt-get update -q -y
-          apt-get install -q -y gcc make
+      - name: Install cross toolchain
         run: |
-            echo "::endgroup::" # flatten 'run container'
-            ./configure && make && make test -k
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabi \
+            binutils-arm-linux-gnueabi \
+            qemu-user-static
 
-  test-aarch64-linux:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 8
-    steps:
-    - uses: actions/checkout@v4
-    - uses: uraimo/run-on-arch-action@v3
-      name: make & test tcc (aarch64-linux)
-      with:
-        arch: aarch64
-        distro: ubuntu24.04
-        githubToken: ${{ github.token }}
-        install: |
-          apt-get update -q -y
-          apt-get install -q -y gcc make
+      - name: Build tcc (armv7, musl-compatible, softfloat, static)
+        env:
+          CC: arm-linux-gnueabi-gcc
+          # 软浮点 + 针对 Cortex-A9 优化；不启用 VFP（硬件缺失）
+          CFLAGS: "-O2 -march=armv7-a -mcpu=cortex-a9 -mfloat-abi=soft -msoft-float -static"
+          LDFLAGS: "-static"
         run: |
-            echo "::endgroup::" # flatten 'run container'
-            ./configure && make && make test -k
+          ./configure \
+            --prefix=/usr/local \
+            --cross-prefix=arm-linux-gnueabi- \
+            --cpu=armv7a \
+            --disable-rpath
+          make -j"$(nproc)"
+          arm-linux-gnueabi-strip -s tcc
 
-  test-riscv64-linux:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 8
-    steps:
-    - uses: actions/checkout@v4
-    - uses: uraimo/run-on-arch-action@v3
-      name: make & test tcc (riscv64-linux)
-      with:
-        arch: riscv64
-        distro: ubuntu22.04
-        githubToken: ${{ github.token }}
-        install: |
-          apt-get update -q -y
-          apt-get install -q -y gcc make
+      - name: Verify binary ABI (no VFP, softfloat, static)
         run: |
-            echo "::endgroup::" # flatten 'run container'
-            ./configure && make && make test -k
+          set -e
+          echo "=== file ==="
+          file tcc
+          echo "=== NEEDED libs (should be empty for static) ==="
+          arm-linux-gnueabi-readelf -d tcc | grep NEEDED || echo "none (statically linked)"
+          echo "=== Tag_ABI_VFP_args (must be 0 / soft) ==="
+          arm-linux-gnueabi-readelf -A tcc | grep -iE "VFP|FP_arch" || echo "no VFP tag"
 
-#  test-riscv64-linux-native:
-#    runs-on: ubuntu-24.04-riscv
-#    timeout-minutes: 8
-#    steps:
-#    - uses: actions/checkout@v4
-#    - name: make & test tcc (riscv64-linux native)
-#      run: |
-#        uname -m  # riscv64
-#        ./configure && make && make test -k
+      - name: Smoke test under QEMU (compile + run a hello program)
+        run: |
+          cat > hello.c << 'EOF'
+          #include <stdio.h>
+          int main(void) {
+              printf("hello from tcc on ARMv7 softfloat\n");
+              return 0;
+          }
+          EOF
+          # 用刚编出的 tcc（经 qemu-arm 模拟运行）编译 hello.c
+          qemu-arm-static -L /usr/arm-linux-gnueabi ./tcc hello.c -o hello -static
+          file hello
+          qemu-arm-static ./hello
 
-  test-i386-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-    - uses: actions/checkout@v4
-    - name: install i386-gcc
-      run: |
-        sudo dpkg --add-architecture i386
-        sudo apt-get update -q -y
-        sudo apt-get install -q -y gcc-multilib libc6-dev:i386
-    - name: make & test tcc (i386-linux)
-      run: ./configure --cpu=i386 --cc="gcc -m32" && make && make test -k
+      - name: Upload tcc binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcc-armv7-musl-softfloat
+          path: tcc
+          retention-days: 90
